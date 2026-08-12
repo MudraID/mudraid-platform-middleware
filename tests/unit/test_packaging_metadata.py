@@ -41,11 +41,33 @@ def test_the_typed_classifier_and_the_marker_agree() -> None:
 
 def test_the_declared_version_is_the_one_the_support_matrix_publishes() -> None:
     """The matrix is the authority on which version is publishable; a manifest
-    that has moved past it would publish an artifact nothing declares."""
+    that has moved past it would publish an artifact nothing declares.
+
+    Two layouts, one guard. In the monorepo this package lives under ``sdks/``
+    and the full matrix sits one level above the package root. In the public
+    mirror the package root IS the repository root, and mirror-sdk.yml ships a
+    trimmed excerpt of the matrix — this package's own name and version —
+    alongside the package. Absence in BOTH places is a failure, not a skip:
+    the publish run in the public repository is the only run that uploads,
+    which makes it exactly the run this guard exists for.
+    """
     import json
 
+    for candidate in (
+        _PACKAGE_ROOT / "support-matrix.json",  # public mirror layout
+        _PACKAGE_ROOT.parent / "support-matrix.json",  # monorepo layout
+    ):
+        if candidate.is_file():
+            matrix = json.loads(candidate.read_text(encoding="utf-8"))
+            break
+    else:
+        raise AssertionError(
+            "support-matrix.json exists neither beside the package (mirror layout) nor "
+            "one level up (monorepo layout); the publishable-version guard has nothing "
+            "to hold the manifest against"
+        )
+
     manifest = tomllib.loads((_PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    matrix = json.loads((_PACKAGE_ROOT.parent / "support-matrix.json").read_text(encoding="utf-8"))
     entry = next(p for p in matrix["packages"] if p["name"] == "mudraid-platform-middleware")
     assert manifest["project"]["version"] == entry["version"] == "1.1.0"
 

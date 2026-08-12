@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "description": "Excerpt of the MudraID support matrix: this package's row only. The publish workflow's test suite holds the manifest version to the version declared here."
+  },
+  "packages": [
+    {
+      "name": "mudraid-platform-middleware",
+      "version": "1.1.0"
+    }
+  ]
+}
