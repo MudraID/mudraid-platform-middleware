@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 — tomllib entered the stdlib in 3.11.
+    # Same parser, pre-stdlib name; declared in the [dev] extra for 3.10 so
+    # the wheel-test lane can collect this module on every interpreter the
+    # classifiers claim.
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import mudraid_platform_middleware
 

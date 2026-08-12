@@ -17,7 +17,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 — tomllib entered the stdlib in 3.11.
+    # Same parser, pre-stdlib name. Declared in the [dev] extra for 3.10, so
+    # the wheel-test lane that installs `[dev]` on every classifier-claimed
+    # interpreter can collect this module on all of them; a bare `import
+    # tomllib` made collection die on 3.10 before a single test ran.
+    import tomli as tomllib  # type: ignore[no-redef]
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _PACKAGE_ROOT / "src" / "mudraid_platform_middleware"

@@ -231,7 +231,12 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           python -m pip install --upgrade pip cyclonedx-bom
-          cyclonedx-py environment /tmp/clean --output-format JSON --outfile sbom.json
+          # `--output-file` (short `-o`), not `--outfile`: cyclonedx-bom 7.x
+          # renamed the flag, and the old spelling exits 2 before writing
+          # anything. This step had never actually run before the first
+          # release attempt — the test step ahead of it had always failed —
+          # so the bad flag was invisible until everything else was green.
+          cyclonedx-py environment /tmp/clean --output-format JSON --output-file sbom.json
 
       - uses: actions/upload-artifact@v4
         if: matrix.python-version == '3.12'

@@ -126,6 +126,11 @@ dev = [
     # FastAPI for integration tests; not a runtime dep because the
     # middleware works against any Starlette-based app.
     "fastapi>=0.110,<1",
+    # tomllib entered the stdlib in 3.11; the packaging-metadata tests parse
+    # pyproject.toml through it and fall back to tomli on 3.10. Declared here
+    # rather than inherited: pytest happens to pull tomli in on 3.10 today,
+    # but a test dependency that arrives transitively is a hope, not a floor.
+    'tomli>=2,<3; python_version < "3.11"',
 ]
 
 [project.urls]
