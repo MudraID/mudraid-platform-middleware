@@ -1,0 +1,277 @@
+name: Publish
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Publishes `mudraid-platform-middleware` to PyPI from MudraID/mudraid-platform-middleware.
+#
+# THIS FILE LIVES IN THE MONOREPO and is mirrored into the public repository
+# alongside the package. That is deliberate: a workflow maintained only in the
+# public repo would drift from the source it publishes, and the drift would be
+# invisible until a release behaved differently from the tree it came from.
+#
+# WHY PUBLISHING HAPPENS HERE AND NOT IN THE MONOREPO. PyPI displays a
+# project's trusted-publisher configuration on the public project page — owner,
+# repository and workflow. Publishing from the private monorepo would put that
+# organisation's name on every package page. Publishing from the public package
+# repository puts the public name there instead, which is the whole reason the
+# MudraID organisation exists.
+#
+# TRUSTED PUBLISHING, NOT AN API TOKEN. GitHub proves its identity to PyPI over
+# OIDC and the credential is minted per run and expires. A long-lived token
+# stored as a secret is precisely what this replaces: it can be exfiltrated,
+# and it works from anywhere.
+#
+# BUILD ONCE, TEST EVERYWHERE, PUBLISH THAT. The jobs below are split on
+# purpose. This is a pure-Python `any` wheel, so building it four times would
+# produce four artifacts of which three are thrown away, and would prove
+# nothing about the fourth. Building once and testing THAT artifact on every
+# interpreter the classifiers claim proves the statement the classifiers make:
+# the file we upload works on 3.10 through 3.13.
+#
+# THE EXTRAS DIFFER FROM THE SDK'S, and deliberately. This package declares
+# only `[dev]`; the SDK also declares a shipped `[v2]` extra and its workflow
+# installs `[v2,dev]` because customers install it. Copying that string here
+# would name an extra this pyproject does not have, and pip would fail the
+# install on a warning nobody would read as the real cause.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Registry to publish to"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Everything that can be wrong with a distribution without a single test
+  # failing. Runs beside `test` rather than after it: these are independent
+  # questions, and finding out about a broken README only once four
+  # interpreters have finished wastes the one thing a release day has least of.
+  #
+  # NOTHING HERE MAY REACH OUTSIDE THE PACKAGE DIRECTORY. This workflow runs in
+  # the mirrored public repository, which contains this package and nothing
+  # else — no monorepo `scripts/`, no workspace pyproject.toml. A step that
+  # shells out to a repo-root helper would pass in the monorepo and fail on the
+  # only run that matters.
+  # ───────────────────────────────────────────────────────────────────────────
+  checks:
+    name: Lint, metadata and dependency audit
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Ruff reads [tool.ruff] from this package's own pyproject.toml, which is
+      # why that config exists here and not only at the workspace root: in this
+      # repository there is no workspace root, and a linter falling back to its
+      # defaults checks different rules against different line lengths while
+      # reporting the same green.
+      - name: Lint
+        run: |
+          python -m pip install --upgrade pip ruff
+          ruff check .
+
+      # `twine check --strict` renders the long_description exactly as PyPI
+      # will. This is the single highest-value gate in the file: a README that
+      # fails to render leaves a permanently broken project page, because PyPI
+      # does not allow re-uploading a version number even after deletion. The
+      # fix for a rendering failure is a NEW version, forever.
+      #
+      # --strict makes a warning fatal. On a one-shot irreversible upload there
+      # is no such thing as a warning worth carrying.
+      - name: Distribution metadata renders on PyPI
+        run: |
+          python -m pip install --upgrade twine
+          twine check --strict dist/*
+
+      # What is IN the artifact, which no test can tell you: tests import from
+      # the source tree or from site-packages, and either way they never look at
+      # the archive. Two failure directions, both silent — a file that should
+      # ship and does not (py.typed, so every downstream type-check quietly
+      # degrades), and a file that ships and should not.
+      - name: Inspect what the archives actually contain
+        env:
+          IMPORT_NAME: mudraid_platform_middleware
+        run: python .github/inspect_distribution.py
+
+      # The dependency scan runs against a FROZEN resolution of the shipped
+      # install — the runtime dependencies a customer gets, not `[dev]` — and
+      # not against the environment pip-audit lives in. Otherwise pip-audit's
+      # own dependency tree lands in the report, and a finding about a tool
+      # nobody ships reads exactly like a finding about the package.
+      #
+      # This package declares no shipped extra, so the wheel is installed bare.
+      # The SDK's equivalent step installs `[v2]`; copying that string here
+      # would name an extra this pyproject does not have.
+      #
+      # --strict fails on a dependency that could not be audited, so a package
+      # missing from the advisory database is a refusal rather than a silent
+      # gap. That requires dropping our own wheel from the list first: it is
+      # installed from a local file, is not on PyPI at scan time, and would
+      # therefore fail --strict on every single run for a reason that has
+      # nothing to do with anyone's security.
+      #
+      # A vulnerability fails the release. If one is genuinely accepted, record
+      # it as `--ignore-vuln <ID>` with the reason beside it, so the acceptance
+      # is a decision someone can read rather than a deleted step.
+      - name: Audit the shipped dependency set
+        run: |
+          python -m venv /tmp/shipped
+          /tmp/shipped/bin/python -m pip install --upgrade pip
+          /tmp/shipped/bin/pip install "$(echo dist/*.whl)"
+          /tmp/shipped/bin/pip freeze --exclude-editable \
+            | grep -v '^mudraid-platform-middleware @' > /tmp/shipped-requirements.txt
+          cat /tmp/shipped-requirements.txt
+          python -m pip install --upgrade pip-audit
+          pip-audit --strict --requirement /tmp/shipped-requirements.txt
+
+  test:
+    name: Test the built wheel on ${{ matrix.python-version }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Every interpreter `Programming Language :: Python :: 3.x` claims in
+      # pyproject.toml, and only those. A classifier is a promise to a
+      # resolver: pip will happily install this wheel on 3.10 because we said
+      # so, and until this matrix existed nothing had ever run it there. One
+      # 3.12 job was evidence about 3.12 and was read as evidence about the
+      # range.
+      #
+      # fail-fast is off so a single-version break reports as a single-version
+      # break. Cancelling the others would hide whether it is one interpreter
+      # or all of them, which is the first thing anyone needs to know.
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Tests run against the INSTALLED wheel, not the source tree. A package
+      # that passes in-tree and fails once installed is the classic packaging
+      # defect — a module left out of the distribution passes every test that
+      # imports it from the working directory.
+      - name: Install the built wheel into a clean environment
+        run: |
+          python -m venv /tmp/clean
+          # pip is upgraded BEFORE anything is resolved. A venv ships whatever
+          # pip the runner's interpreter bundled, which can be many months old,
+          # and pip is the component that reads the dependency floors in
+          # pyproject.toml. The security floor declared there — pytest>=9.0.3,
+          # for PYSEC-2026-1845 — is only actually enforced by a resolver new
+          # enough to see the metadata that carries it, so an old pip turns a
+          # declared floor into a hope.
+          /tmp/clean/bin/python -m pip install --upgrade pip
+          /tmp/clean/bin/pip --version
+          # The `[dev]` extra is applied TO THE WHEEL, not to `.`. That one
+          # character is the difference between testing the artifact and testing
+          # the working directory: `pip install ".[dev]"` would install the
+          # package from source and the wheel would never be exercised at all.
+          #
+          # Naming the test tools here instead would drift from pyproject.toml,
+          # and the drift shows up as a collection error on release day — a
+          # missing pytest-asyncio turns every async test into a silent non-run,
+          # which is worse than a failure because the run still reports a
+          # passing count.
+          /tmp/clean/bin/pip install "$(echo dist/*.whl)[dev]"
+
+      - name: Test against the installed artifact
+        run: |
+          # From /tmp, so the import resolves from site-packages rather than
+          # from the source tree sitting in the working directory.
+          cd /tmp && /tmp/clean/bin/python -c "import mudraid_platform_middleware as m; print(m.__version__)"
+          cd ${{ github.workspace }} && /tmp/clean/bin/python -m pytest tests/unit -q
+
+      # Inventoried from the venv the tests just ran in, on one interpreter
+      # rather than four. That is not a shortcut: an SBOM generated from a
+      # freshly resolved environment describes packages nothing exercised,
+      # while this one describes exactly the environment that passed above.
+      - name: Generate SBOM
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip install --upgrade pip cyclonedx-bom
+          cyclonedx-py environment /tmp/clean --output-format JSON --outfile sbom.json
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: sbom
+          path: sbom.json
+
+  publish:
+    name: Publish (approval required)
+    needs: [test, checks]
+    runs-on: ubuntu-latest
+    # The approval gate. Without it, anything able to trigger this workflow
+    # could publish an irreversible version — PyPI does not allow re-uploading
+    # a version number, even after deletion.
+    environment: pypi-publish
+    permissions:
+      id-token: write        # OIDC for trusted publishing
+      attestations: write    # build provenance
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+
+      - name: Publish to TestPyPI
+        if: inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      # `release: published` reaches here with no inputs, so the condition is
+      # written to require the explicit choice rather than to exclude the other
+      # one. A default-to-production publish on an unexpected trigger is the
+      # mistake this shape prevents.
+      - name: Publish to PyPI
+        if: inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

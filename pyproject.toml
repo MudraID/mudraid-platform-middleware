@@ -1,0 +1,186 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mudraid-platform-middleware"
+version = "1.1.0"
+description = "FastAPI/Starlette middleware for MudraID — verifies MudraID-issued JWTs against per-platform scopes with zero changes to your route handlers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "MudraID" },
+]
+keywords = [
+    "mudraid",
+    "platform",
+    "middleware",
+    "fastapi",
+    "starlette",
+    "jwt",
+    "authorization",
+    "ai-agents",
+]
+classifiers = [
+    # "Development Status :: 5 - Production/Stable" is a claim rather than a
+    # formality, so it is made deliberately and it is made about ONE thing: this
+    # middleware's own surface. 1.1.0 is the API MudraID intends to keep, which
+    # is what this classifier says and all it says.
+    #
+    # It does NOT say the package is on PyPI yet — that is a different fact,
+    # carried by `support_status` in `sdks/support-matrix.json`, which stays
+    # `prerelease` until the first upload actually lands.
+    # scripts/check_adapter_support_matrix.py guards that one.
+    #
+    # It does NOT say the enforcement loop is production-proven. This package
+    # verifies signed bundles and turns them into allow/deny outcomes; whether
+    # that loop has been demonstrated end to end against a real surface is a
+    # separate fact, and one the product still reports as a declared gap rather
+    # than as delivered.
+    #
+    # This classifier must equal the `maturity` its matrix entry declares —
+    # `stable`. scripts/check_release_maturity.py holds the two equal, because
+    # they contradicted each other once and it was invisible until someone read
+    # both files side by side.
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+# Runtime deps are picked deliberately:
+#   - PyJWT:    mature, audited JWT decode/verify
+#   - cryptography: PyJWT's RS256 backend
+#   - httpx:    async-capable HTTP client for the JWKS fetch
+#   - pyyaml:   parses the mudraid_scopes.yaml file
+#   - starlette: provides BaseHTTPMiddleware + Request/Response; FastAPI
+#                already pulls it transitively, but we declare it
+#                explicitly so the package is also usable from any
+#                Starlette-based app, not just FastAPI.
+dependencies = [
+    # SECURITY FLOORS, not compatibility floors, and the distinction matters
+    # when someone is tempted to relax them.
+    #
+    # The previous ranges were `pyjwt>=2.8,<3` and `cryptography>=42.0,<44`.
+    # Read against PyPI's advisory data on 2026-08-10:
+    #
+    #   cryptography 43.0.3 -> 11 advisories, fixes required up to 49.0.0
+    #   cryptography 45.0.7 -> 13 advisories, fixes required up to 50.0.0
+    #   cryptography 49.0.0 ->  2 advisories, fixed in 50.0.0
+    #   cryptography 50.0.0 ->  0
+    #   pyjwt        2.8.0  -> 10 advisories, fixes required up to 2.13.0
+    #   pyjwt        2.13.0 ->  0
+    #
+    # So `<44` did not merely permit a vulnerable version — it made a clean scan
+    # UNREACHABLE inside the declared range. A security product must not ship a
+    # constraint that forces its consumers onto affected versions.
+    #
+    # No upper bound on cryptography, deliberately. The cap that caused this had
+    # no recorded reason, and re-capping would rebuild the same trap one major
+    # later. What this package uses of the API — PyJWT's RSA backend and one
+    # `RSAPublicKey` isinstance check — has been stable for many majors, and
+    # cryptography deprecates before it removes. PyJWT keeps `<3` because a
+    # major there would be a real API break, not a hypothetical one.
+    #
+    # Both floors support the full declared Python range (3.10–3.14), and the
+    # whole suite was run against cryptography 50.0.0 + PyJWT 2.13.0 before this
+    # was changed.
+    "pyjwt[crypto]>=2.13.0,<3",
+    "cryptography>=50.0.0",
+    "httpx>=0.27,<1",
+    "pyyaml>=6.0,<7",
+    # Upper bound widened to `<2` so the SDK is installable alongside services
+    # that pin starlette 1.x (ownership-service moved to 1.3.1 to clear CVEs).
+    # `BaseHTTPMiddleware`, `Request`, `Response` — the only starlette symbols
+    # we use — are stable across 0.37 → 1.3.
+    "starlette>=0.37,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    # 9.0.3 is a security floor, not a preference: pytest before it carries
+    # PYSEC-2026-1845 (predictable temporary-directory handling on Unix), and
+    # the previous `>=8.0,<9` could not reach the fix from inside its own
+    # range. Nothing here reaches customer runtime, whose audit is clean —
+    # this is the build and test supply chain, held to the same rule.
+    # pytest and pytest-asyncio move together or collection crashes; the
+    # `asyncio_mode = "auto"` setting below is unchanged and still honoured
+    # by pytest-asyncio 1.x.
+    "pytest>=9.0.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "pytest-cov>=7,<8",
+    # respx mocks httpx — used to test the JWKS client without a live
+    # backend. The analogue of `responses` from the agent SDK.
+    "respx>=0.21,<1",
+    # FastAPI for integration tests; not a runtime dep because the
+    # middleware works against any Starlette-based app.
+    "fastapi>=0.110,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/MudraID/mudraid-platform-middleware"
+Documentation = "https://docs.mudraid.ai"
+Repository = "https://github.com/MudraID/mudraid-platform-middleware"
+Issues = "https://github.com/MudraID/mudraid-platform-middleware/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mudraid_platform_middleware"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/mudraid_platform_middleware",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+asyncio_mode = "auto"
+
+# Align black + isort with the rest of the repo (line-length 100 from the
+# root pyproject.toml). The SDK pyproject is discovered first when black
+# is invoked with cwd=sdks/mudraid-middleware-python.
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+# Ruff is configured HERE and not only at the workspace root, because this
+# directory is mirrored to a public repository where no workspace root exists.
+# A package that inherits its lint rules from a parent it does not ship with is
+# a package whose published CI lints with defaults — different rules, silently.
+#
+# target-version is py310, not the workspace's py311: `requires-python` admits
+# 3.10, so the rules must target the OLDEST interpreter this package claims.
+# Linting against a newer one permits syntax that fails for a customer on the
+# version we told pip was fine.
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.isort]
+# Without this, ruff has no way to know this package is ours and groups it with
+# third-party imports — which is not a style question here: it is the package
+# under test being filed as somebody else's.
+known-first-party = ["mudraid_platform_middleware"]
