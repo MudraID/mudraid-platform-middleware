@@ -8,6 +8,8 @@ and every scope-gated route is enforced before reaching your handler.
 **No decorators, no per-route auth code, zero changes to existing route files.**
 
 ```python
+# MUDRAID_JWKS_URL must be set in the environment — there is no default,
+# and the middleware refuses to construct without it.
 from fastapi import FastAPI
 from mudraid_platform_middleware import MudraIDMiddleware
 
@@ -19,8 +21,10 @@ def list_items():
     return {"items": [...]}   # gets to here only after JWT + scope check pass
 ```
 
-That's the entire integration. Two lines plus a YAML file in your
-project root.
+That's the entire integration. Two lines, one environment variable, and a
+YAML file in your project root — then [verify it is actually in the
+stack](#4-verify-the-integration-before-trusting-it), because adding the
+package is not the same act as adding the middleware.
 
 ---
 
@@ -42,24 +46,21 @@ For every incoming request:
    without the handler ever being called.
 
 All of this happens before your route code runs — your handler only
-sees authenticated, authorised, scope-checked requests.
+sees authenticated, authorised, scope-checked requests, *once the
+middleware is actually in the ASGI stack*. Confirm that first:
+see [Verify the integration before trusting
+it](#4-verify-the-integration-before-trusting-it).
 
 ---
 
 ## Installation
 
 ```bash
-pip install mudraid-platform-middleware
+pip install mudraid-platform-middleware==1.1.0
 ```
 
 Requires Python 3.10+. Brings in `pyjwt[crypto]`, `cryptography`,
 `httpx`, `pyyaml`, and `starlette` as runtime deps.
-
-> **1.1.0 is not on PyPI yet.** Install from source until the first
-> upload lands:
-> ```bash
-> pip install -e sdks/mudraid-middleware-python  # from the repo root
-> ```
 
 ---
 
@@ -95,7 +96,15 @@ routes:
     scope: items:write
 ```
 
-### 3. Add two lines to your FastAPI app
+### 3. Set the JWKS URL and add two lines to your FastAPI app
+
+`MUDRAID_JWKS_URL` is required and has no default. Take it from the credential
+screen in the portal — it is the `/.well-known/jwks.json` path on the MudraID
+environment your platform is registered with:
+
+```bash
+export MUDRAID_JWKS_URL="<the JWKS URL from your credential screen>"
+```
 
 ```python
 from fastapi import FastAPI
@@ -105,11 +114,42 @@ app = FastAPI()
 app.add_middleware(MudraIDMiddleware)
 ```
 
+Pass it in code instead if you would rather not use the environment:
+`app.add_middleware(MudraIDMiddleware, jwks_url="https://…/.well-known/jwks.json")`.
+With neither set, the middleware raises `ValueError` when Starlette builds the
+ASGI stack — it will not boot and quietly accept nothing.
+
 That's the entire change.
 
 Your existing route handlers stay untouched — no decorators, no auth
 parameters, no per-route checks. The middleware enforces the rules
 in `mudraid_scopes.yaml` before requests reach them.
+
+### 4. Verify the integration before trusting it
+
+`curl` a scope-gated route with no `Authorization` header. A wired middleware
+answers `401 MISSING_TOKEN` — or `404 ROUTE_NOT_FOUND` if the path does not
+match your YAML.
+
+```bash
+curl -i http://localhost:8000/api/v1/items
+# → 401 {"error_code":"MISSING_TOKEN", ...}     the middleware is in the stack
+# → 404 {"error_code":"ROUTE_NOT_FOUND", ...}   in the stack; your YAML does not
+#                                               cover this path
+```
+
+**If your own handler runs instead — a `200`, a `201`, your JSON — the
+middleware is not in the ASGI stack.** Installing the package and downloading
+`mudraid_scopes.yaml` does not put it there; `add_middleware` does. There is no
+other state that produces your handler's response: wired with no token is `401`,
+wired with the wrong scope is `403`, wired with a path your YAML does not cover
+is `404`, and wired with unreadable YAML is `500`. Reaching the handler means
+nothing enforced.
+
+**The portal cannot detect this for you.** **Verified** means your domain was
+proven by a DNS TXT record, and **Active** means the surface may use the API.
+Both are set the moment DNS verification succeeds. Neither means MudraID has
+observed a single enforced request.
 
 ---
 
@@ -118,17 +158,47 @@ in `mudraid_scopes.yaml` before requests reach them.
 | Setting | Env var | Constructor kwarg | Default |
 |---|---|---|---|
 | YAML path | — | `scopes_yaml_path=` | `./mudraid_scopes.yaml` (cwd) |
-| MudraID JWKS URL | `MUDRAID_JWKS_URL` | `jwks_url=` | `https://api.mudraid.ai/.well-known/jwks.json` |
+| MudraID JWKS URL | `MUDRAID_JWKS_URL` | `jwks_url=` | **none — required; construction raises without it** |
+
+**There is no default JWKS URL, deliberately.** A MudraID hostname compiled
+into the package would make the build environment-specific, and — worse — an
+unconfigured platform would fetch its *signing keys* from a host nobody chose,
+so whoever answered would be deciding which tokens the platform accepts. In V1
+mode the middleware therefore raises `ValueError` when it is constructed with
+neither `jwks_url=` nor `MUDRAID_JWKS_URL` set, naming the setting. Starlette
+constructs middleware when it builds the ASGI stack, so an unconfigured app
+fails there rather than booting and rejecting every token afterwards.
+
+Point it at the `/.well-known/jwks.json` path on the MudraID environment your
+platform is registered with — the portal prints it on the credential screen.
 
 Everything else (cache TTLs, clock-skew leeway, request-body limits)
 is internal and stable in v1.
 
-### V2 mode (`mode="v2"`) — full action enforcement
+### V2 mode (`mode="v2"`) — live tool-action enforcement for MCP servers
+
+> **V2 is for MCP servers only. Read this before configuring it.**
+>
+> MudraID V2 provides live action authorization for MCP Streamable HTTP tool
+> calls. MCP transport and session requests remain subject to the MCP server's
+> normal HTTP/OAuth authentication. For ordinary REST APIs, use MudraID's
+> route/scope middleware, which enforces the configured HTTP method and
+> route—including GET and DELETE.
+>
+> This is not a preference. The V2 control loop treats `GET`/`HEAD`/`OPTIONS` as
+> Streamable-HTTP transport and `DELETE` as MCP session control, and makes no
+> `/decide` call for any of them. That is correct for MCP Streamable HTTP and
+> wrong for a REST API, where a `GET` reads and a `DELETE` destroys. Point V2 at
+> your MCP endpoint; point V1 at everything else.
 
 V2 adds signed-bundle action enforcement on top of V1's token and scope
-checking: every `tools/call` on a protected surface resolves to a canonical
-action and gets a live authority decision, and anything that cannot be decided
-is denied rather than allowed.
+checking, for MCP surfaces: every `tools/call` on a protected surface resolves
+to a canonical action and gets a live authority decision, and anything that
+cannot be decided is denied rather than allowed. MCP control and discovery
+messages — `initialize`, `ping`, `tools/list` and the rest of `public_methods` —
+pass a protected surface without a decision; they do not receive a `/decide`
+verdict, and nothing here authenticates the MCP transport or session on your
+server's behalf.
 
 `HttpDecideClient` is the supported implementation — it fetches and verifies the
 signed bundle, keeps it refreshed, resolves tool names to canonical actions, and
@@ -167,7 +237,7 @@ async def _stop_enforcement() -> None:
 app.add_middleware(
     MudraIDMiddleware,
     mode="v2",
-    v2=V2Config(decide_client=decide_client, protected_paths=("/mcp",)),
+    v2_config=V2Config(decide_client=decide_client, protected_paths=("/mcp",)),
 )
 ```
 
@@ -180,10 +250,17 @@ app.add_middleware(
 
 | Setting | `V2Config` field | Default |
 |---|---|---|
-| Protected surfaces | `protected_paths=` | `None` (every route is protected) |
+| Protected surfaces | `protected_paths=` | `None` (every route runs the V2 loop) |
 | Bounded body limit | `max_body_bytes=` | `1048576` (1 MiB) — Kong defaults to 128 KiB |
 | Control/discovery allowlist | `public_methods=` | `DEFAULT_PUBLIC_METHODS` |
 | `/decide` deadline | `decide_timeout_sec=` | `2.0` |
+
+**Set `protected_paths` to your MCP Streamable HTTP endpoints — for example
+`("/mcp",)`.** The `None` default runs the V2 loop on every route the app
+serves, which is only correct when every route on the app *is* an MCP
+Streamable HTTP endpoint. On an app that also serves ordinary REST routes,
+leaving it `None` applies MCP framing rules to routes that are not MCP: name the
+MCP endpoints explicitly and enforce the REST routes with V1.
 
 **`protected_paths` matches whole path segments, not characters.** A configured
 `/mcp` protects `/mcp`, `/mcp/` and `/mcp/tools` — and does *not* protect
@@ -240,6 +317,25 @@ this table is updated in the same commit.
 `DecideClient` whether or not it sets one of its own. It expires deny-closed
 (503 `ENFORCE_DECIDE_UNAVAILABLE`), matching the plugin's `decide_timeout_ms`
 default of 2000. Set it to `None` only if your client is known to bound itself.
+
+### If you registered an adapter declaring the `http` protocol mode
+
+`mcp_streamable_http` is now the only protocol mode a V2 enforcement adapter may
+declare. A bare `http` mode is no longer accepted, and an existing record that
+carries it is **not** silently reinterpreted as MCP — a record that says `http`
+described a surface V2 cannot correctly enforce, and quietly reading it as
+something else would leave a REST API's `GET` and `DELETE` unauthorized while
+the record claimed otherwise. The record fails validation on its next write,
+visibly.
+
+Two ways forward, both operator decisions rather than automatic ones:
+
+- **The surface is an ordinary REST API.** Move it to the V1 route/scope
+  middleware, which enforces the configured HTTP method and route including
+  `GET` and `DELETE`, and retire the V2 adapter record.
+- **The surface really is MCP Streamable HTTP.** Reclassify it: re-register the
+  adapter with `mcp_streamable_http` and set `protected_paths` to the MCP
+  endpoints, e.g. `/mcp`.
 
 ```python
 # Local development against the docker-compose stack:
