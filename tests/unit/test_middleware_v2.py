@@ -33,10 +33,10 @@ import respx
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import FastAPI
 from httpx import ASGITransport
-from mudraid_platform_middleware import DecideContext, DecideResult, MudraIDMiddleware, V2Config
-from mudraid_platform_middleware._v2_control_loop import V2RequestFacts, evaluate_v2
 from starlette.requests import Request
 
+from mudraid_platform_middleware import DecideContext, DecideResult, MudraIDMiddleware, V2Config
+from mudraid_platform_middleware._v2_control_loop import V2RequestFacts, evaluate_v2
 from tests.conftest import baseline_claims, sign_jwt
 
 # ---------------------------------------------------------------------------
