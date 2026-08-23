@@ -221,6 +221,25 @@ class HttpDecideClient:
         channel_timeout_seconds: Deadline for one channel request.
         decide_timeout_seconds: Deadline for one ``/decide`` call. The middleware
             applies its own deadline as well; this one bounds the transport.
+        require_signed_decisions: Whether an UNSIGNED ``/decide`` response is
+            refused. Optional and ``False`` by default, so 1.1-compatible
+            behaviour is unchanged.
+
+            ``False`` — an unsigned response is read as before; a signature that
+            IS present must still verify completely or the whole response is
+            refused (verify-when-present).
+
+            ``True`` — an unsigned response is refused as well. This is the mode
+            that closes signature-stripping by a party who can terminate TLS,
+            and the only mode in which a decision response is meaningfully
+            authenticated by its signature.
+
+            In BOTH modes an invalid, unknown-key, expired or binding-mismatched
+            signature is refused, and every refusal deny-closes as ``"error"``.
+            Turn this on only for a surface the authority already signs for:
+            MudraID does not sign decision responses today, so enabling it now
+            denies every decision. It has no effect on V1 mode, which makes no
+            ``/decide`` call.
         client: An injected :class:`httpx.AsyncClient`, for tests or for a
             platform that needs its own transport, proxies or TLS context. When
             supplied it is NOT closed by :meth:`aclose` — whoever owns it closes
@@ -254,6 +273,22 @@ class HttpDecideClient:
         decide_timeout_seconds: float = 2.0,
         allowed_origins: frozenset[str] | set[str] | None = None,
         allow_insecure_loopback: bool = False,
+        # A9-02 / Decision 8. Optional, and OFF by default so 1.1-compatible
+        # behaviour is unchanged for every existing deployment.
+        #
+        #   False — an UNSIGNED decision response is read as before; a PRESENT
+        #           signature must still verify completely or the response is
+        #           refused (verify-when-present);
+        #   True  — an UNSIGNED decision response is REFUSED, closing the
+        #           signature-stripping gap against a TLS-terminating party.
+        #
+        # Only turn this on for a surface the authority actually signs for;
+        # until then it would deny-close every decision. It lives HERE, on the
+        # client that holds the signature and does the verifying, rather than on
+        # V2Config: the DecideClient seam is a Protocol whose decide() carries no
+        # channel for a verification policy, so a copy of this setting on the
+        # config object could not be honoured for an injected client.
+        require_signed_decisions: bool = False,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         origins = (
@@ -300,6 +335,9 @@ class HttpDecideClient:
         # Empty until published, which refuses any SIGNED decision (unknown
         # key) while still reading unsigned ones — verify-when-present.
         self._decision_verification_keys: dict[str, str] = {}
+        # Whether an UNSIGNED decision response is refused. See the constructor
+        # note; default False keeps 1.1-compatible verify-when-present.
+        self._require_signed_decisions = require_signed_decisions
         self._poll_interval = poll_interval_seconds
         self._channel_timeout = channel_timeout_seconds
         self._decide_timeout = decide_timeout_seconds
@@ -603,6 +641,9 @@ class HttpDecideClient:
                 action_key=action,
                 bundle_version=bundle.bundle_version,
             ),
+            # Decision 8: when on, an unsigned response is refused rather than
+            # read. Off by default — see the constructor note.
+            require_signed_decisions=self._require_signed_decisions,
         )
 
     def _envelope(
@@ -686,6 +727,7 @@ def _read_decision(
     now: datetime | None = None,
     verification_keys: dict[str, str] | None = None,
     expected_bindings: DecisionBindings | None = None,
+    require_signed_decisions: bool = False,
 ) -> DecideResult:
     """Turn an authority response into a result, or refuse to read it.
 
@@ -707,12 +749,19 @@ def _read_decision(
        the published decision key series and this adapter's own surface/action
        bindings (``_decision_signature``). A response carrying a signature that
        does not verify completely — wrong key, wrong surface, mutated field,
-       expired window — is refused whole. A response carrying NO signature is
-       still read (the authority activates signing by rollout, and refusing
-       every unsigned response would make that activation a flag-day), which
-       means signature-stripping by a TLS-terminating party is not yet closed
-       until the authority's signing activation is universal. Nothing in this
-       package may overstate layer 2 beyond that.
+       expired window — is refused whole. What a response carrying NO signature
+       means is the operator's choice, via ``require_signed_decisions``:
+
+         * off (default) — an unsigned response is read as before, because the
+           authority activates signing by rollout and refusing every unsigned
+           response would make that activation a flag-day. In this mode
+           signature-stripping by a TLS-terminating party is NOT closed;
+         * on — an unsigned response is refused. This is the mode in which
+           layer 2 actually authenticates the decision, and it is only
+           deployable once the authority signs for the surface in question.
+
+       Nothing in this package may describe decision responses as
+       cryptographically authenticated while the flag is off.
 
     Every failure below returns a result the control loop deny-closes.
     """
@@ -764,15 +813,26 @@ def _read_decision(
         _logger.warning("/decide response is past its deadline")
         return DecideResult("error")
 
-    # ── Signature (A9-02): verify when present, refuse when present-and-wrong ─
+    # ── Signature (A9-02): verify when present; require it when configured ───
     #
     # Placed AFTER the envelope-level binding so the signature is checked on a
     # response already known to answer THIS request, and BEFORE the outcome is
     # read so no allow/deny is ever surfaced from a response whose signature
-    # failed. A present signature must verify completely — unknown key,
+    # failed.
+    #
+    # A PRESENT signature must verify completely, in BOTH modes — unknown key,
     # mutated bound field, foreign surface/action, expired window all refuse
-    # the whole response. An absent signature is read as before: the authority
-    # rolls signing out by activation, and the rollout must not be a flag-day.
+    # the whole response. ``require_signed_decisions`` governs only what an
+    # ABSENT signature means, because absence and invalidity are different
+    # facts and collapsing them would let an attacker downgrade by corrupting
+    # one field rather than stripping the whole signature:
+    #
+    #   off (default) — absent is read as before, keeping the authority's
+    #                   signing rollout from becoming a flag-day (1.1-compatible);
+    #   on            — absent is refused, which is what closes the stripping
+    #                   gap for a party who can terminate TLS.
+    #
+    # Both refusals deny CLOSED: "error", never an allow.
     if decoded.get("signature") is not None:
         try:
             verify_decision_signature(
@@ -784,6 +844,11 @@ def _read_decision(
         except DecisionSignatureRefused as exc:
             _logger.error("/decide response signature REFUSED (%s)", exc.code)
             return DecideResult("error")
+    elif require_signed_decisions:
+        # Mandatory mode. Note this also covers ``"signature": null``, which is
+        # absence, not a malformed signature object.
+        _logger.error("/decide response carries no signature and require_signed_decisions is on")
+        return DecideResult("error")
 
     # ── Outcome, and the governed reason code ────────────────────────────────
     decision = decoded.get("decision")

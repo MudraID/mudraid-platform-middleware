@@ -18,9 +18,11 @@ is a strict, additive OPT-IN: V1 remains the default and is unchanged.
    decision id bound to the request it sent, and a recognised decision. A bare
    ``{"decision": "allow"}`` is not a readable answer.
 
-   **This client can verify a signed decision response (A9-02) — and today the
-   authority does not sign one.** Both halves matter, and stating only the
-   first would be a security claim the deployment does not support.
+   **This client can verify a signed decision response (A9-02), and can be
+   configured to REQUIRE one — and today the authority does not sign one and
+   the requiring flag is off in every environment.** All three halves matter,
+   and stating only the first two would be a security claim the deployment does
+   not support.
 
    What ships here: when a response CARRIES a signature, this client verifies
    it (RS256 over claims binding the decision id, outcome and reason code,
@@ -31,13 +33,23 @@ is a strict, additive OPT-IN: V1 remains the default and is unchanged.
    including one arriving before this client has fetched the decision keys — is
    refused, never skipped.
 
-   What is NOT true yet: signing is OFF. ``MUDRAID_ENFORCE_DECISION_SIGNING_ENABLED``
-   defaults to false and is set in no environment, so every response today is
-   unsigned and this verification path does not execute. An UNSIGNED response
-   is read as before — the authority activates signing by rollout, not a
-   flag-day — which means a party who can terminate TLS can still strip a
-   signature, and until activation is universal that gap is open. Do not read
-   the presence of this code as the protection being active.
+   Also shipping: :class:`HttpDecideClient` takes an optional
+   ``require_signed_decisions`` (default ``False``). When ``True``, an UNSIGNED
+   decision response is refused as well — the mode that actually closes
+   signature-stripping. It is deliberately off by default, so 1.1-compatible
+   behaviour is unchanged, and it is only deployable on a surface the authority
+   already signs for; turning it on before then deny-closes every decision.
+
+   What is NOT true yet: signing is OFF, and so is the flag.
+   ``MUDRAID_ENFORCE_DECISION_SIGNING_ENABLED`` defaults to false and is set in
+   no environment, so every response today is unsigned; and
+   ``require_signed_decisions`` is off in every environment, so unsigned
+   responses are read as before. That means a party who can terminate TLS can
+   still strip a signature, and until BOTH the authority's activation and this
+   flag are on for a surface, that gap is open. **Decision responses are not
+   cryptographically authenticated today** — they are authenticated by the
+   transport plus the request binding. Do not read the presence of this code,
+   or the availability of mandatory mode, as the protection being active.
 
    Until then V2 remains staging-qualified: deployable and testable against a
    real authority, not yet a finished public package.

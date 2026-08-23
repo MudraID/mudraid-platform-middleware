@@ -44,9 +44,15 @@ them into allow/deny outcomes on a request path:
   obtained, verified, or read within its freshness window is a denial, never an
   allow. **A path that reaches an allow without a verified decision is a
   vulnerability in this library**, and is the class of report we most want.
-- It **does not sign decision responses** in this release, and does not claim
-  to. Do not build a trust assumption on a signature that is not there — see
-  the README for what is and is not authenticated today.
+- The MudraID authority **does not sign decision responses** in this release,
+  and this library does not claim it does. The library can *verify* an RS256
+  decision signature when one is present, and can be configured to *require*
+  one (`HttpDecideClient(require_signed_decisions=True)`) — but that flag
+  defaults to off and is off in every environment, so decision responses are
+  **not cryptographically authenticated today**. Do not build a trust
+  assumption on a signature that is not there, and do not read the availability
+  of mandatory mode as the protection being active — see the README for what is
+  and is not authenticated today.
 - It holds a credential you supply. It never writes one to disk and never logs
   one; **a credential appearing in any log line is a vulnerability**, and one we
   will treat as such even when nothing else is exploitable.

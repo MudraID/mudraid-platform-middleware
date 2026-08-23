@@ -247,11 +247,14 @@ app.add_middleware(
 ```
 
 > **Staging-qualified, not generally production-ready.** The decision exchange
-> is versioned in both directions and every response is bound to the request that
-> asked for it, but the response is authenticated by the transport alone. A
-> signed decision response is required before this is described as a finished
-> public package. Deploy it behind a version you control, and measure it
-> end-to-end against your own authority first.
+> is versioned in both directions and every response is bound to the request
+> that asked for it. The client also verifies an RS256 decision signature when
+> one is present, and can be configured to require one
+> (`require_signed_decisions=True`) — but the authority does not sign decision
+> responses today, and that flag is off in every environment. So in practice a
+> decision response is still authenticated by the transport plus the request
+> binding, **not cryptographically authenticated**. Deploy it behind a version
+> you control, and measure it end-to-end against your own authority first.
 
 | Setting | `V2Config` field | Default |
 |---|---|---|
@@ -259,6 +262,33 @@ app.add_middleware(
 | Bounded body limit | `max_body_bytes=` | `1048576` (1 MiB) — Kong defaults to 128 KiB |
 | Control/discovery allowlist | `public_methods=` | `DEFAULT_PUBLIC_METHODS` |
 | `/decide` deadline | `decide_timeout_sec=` | `2.0` |
+
+Decision-signature policy is **not** a `V2Config` field. It belongs to the
+client that holds the signature and verifies it, so it is set on
+`HttpDecideClient`:
+
+| Setting | `HttpDecideClient` kwarg | Default |
+|---|---|---|
+| Require a signed decision response | `require_signed_decisions=` | `False` |
+
+```python
+decide_client = HttpDecideClient(
+    base_url=...,
+    adapter_token=...,
+    require_signed_decisions=True,   # only once the authority signs for this surface
+)
+```
+
+- `False` (default) — an **unsigned** decision response is read as before. A
+  signature that *is* present must still verify completely, or the whole
+  response is refused. This is the 1.1-compatible behaviour.
+- `True` — an **unsigned** decision response is refused too. This is the mode
+  that closes signature-stripping by a party who can terminate TLS.
+
+In both modes an invalid, unknown-key, expired or binding-mismatched signature
+is refused, and every refusal denies **closed** (never an allow). Turn this on
+only for a surface the authority already signs for — before that it denies
+every decision. It has no effect on V1 mode, which makes no `/decide` call.
 
 **Set `protected_paths` to your MCP Streamable HTTP endpoints — for example
 `("/mcp",)`.** The `None` default runs the V2 loop on every route the app
