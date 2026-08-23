@@ -18,12 +18,29 @@ is a strict, additive OPT-IN: V1 remains the default and is unchanged.
    decision id bound to the request it sent, and a recognised decision. A bare
    ``{"decision": "allow"}`` is not a readable answer.
 
-   **What is still outstanding, and it gates public publication rather than
-   staging use:** the decision response is authenticated by the transport only.
-   A signed or MAC-authenticated response — bound to the decision id, outcome,
-   action, resource and policy version — is required before this is described as
-   generally production-ready. Until then V2 is staging-qualified: deployable and
-   testable against a real authority, not yet a finished public package.
+   **This client can verify a signed decision response (A9-02) — and today the
+   authority does not sign one.** Both halves matter, and stating only the
+   first would be a security claim the deployment does not support.
+
+   What ships here: when a response CARRIES a signature, this client verifies
+   it (RS256 over claims binding the decision id, outcome and reason code,
+   tenant, environment, platform surface, agent, action, resource,
+   bundle/policy versions and a bounded validity window) against the published
+   decision key series and the adapter's own bundle surface, refusing the whole
+   response on any mismatch. A signature that is present but unverifiable —
+   including one arriving before this client has fetched the decision keys — is
+   refused, never skipped.
+
+   What is NOT true yet: signing is OFF. ``MUDRAID_ENFORCE_DECISION_SIGNING_ENABLED``
+   defaults to false and is set in no environment, so every response today is
+   unsigned and this verification path does not execute. An UNSIGNED response
+   is read as before — the authority activates signing by rollout, not a
+   flag-day — which means a party who can terminate TLS can still strip a
+   signature, and until activation is universal that gap is open. Do not read
+   the presence of this code as the protection being active.
+
+   Until then V2 remains staging-qualified: deployable and testable against a
+   real authority, not yet a finished public package.
 
 The two things V2 mode needs that V1 doesn't are supplied here:
 

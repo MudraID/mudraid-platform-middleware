@@ -52,6 +52,11 @@ from mudraid_platform_middleware._contract import (
     REQUEST_CONTRACT,
     SUPPORTED_RESPONSE_CONTRACTS,
 )
+from mudraid_platform_middleware._decision_signature import (
+    DecisionBindings,
+    DecisionSignatureRefused,
+    verify_decision_signature,
+)
 from mudraid_platform_middleware._v2_control_loop import DecideResult
 from mudraid_platform_middleware.v2 import DecideContext
 
@@ -289,6 +294,12 @@ class HttpDecideClient:
         # until the first fetch succeeds, which means a signed bundle arriving
         # first is REFUSED rather than trusted — the correct order.
         self._verification_keys: dict[str, str] = {}
+        # A9-02: the DECISION-response verification keys — a DIFFERENT series
+        # from the bundle keys, served on the same page. Kept separate so a
+        # decision can never verify against the bundle key or vice versa.
+        # Empty until published, which refuses any SIGNED decision (unknown
+        # key) while still reading unsigned ones — verify-when-present.
+        self._decision_verification_keys: dict[str, str] = {}
         self._poll_interval = poll_interval_seconds
         self._channel_timeout = channel_timeout_seconds
         self._decide_timeout = decide_timeout_seconds
@@ -381,16 +392,26 @@ class HttpDecideClient:
             _logger.warning("verification keys response carried no keys")
             return
 
-        fresh: dict[str, str] = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            key_id = entry.get("key_id")
-            pem = entry.get("public_key_pem")
-            if isinstance(key_id, str) and key_id and isinstance(pem, str) and pem:
-                fresh[key_id] = pem
+        fresh = _key_map(entries)
         if fresh:
             self._verification_keys = fresh
+
+        # A9-02: the decision-response key series, from the additive
+        # ``key_sets`` projection. Same replace-never-clear discipline, per
+        # series: a page that stops carrying the decision set (older control
+        # plane, or a series not yet rotated) leaves the working set alone,
+        # while a successful decision-set read REPLACES it so rotation takes
+        # effect at the next refresh.
+        key_sets = payload.get("key_sets") if isinstance(payload, dict) else None
+        if isinstance(key_sets, list):
+            for key_set in key_sets:
+                if not isinstance(key_set, dict):
+                    continue
+                if key_set.get("purpose") != "enforcement_decision_signing":
+                    continue
+                fresh_decision = _key_map(key_set.get("keys"))
+                if fresh_decision:
+                    self._decision_verification_keys = fresh_decision
 
     async def _refresh_loop(self) -> None:
         while True:
@@ -566,7 +587,23 @@ class HttpDecideClient:
             decoded = loads_strict(raw)
         except Exception:  # noqa: BLE001
             return DecideResult("error")
-        return _read_decision(decoded, expected_decision_id=decision_id)
+        surface = bundle.surface
+        return _read_decision(
+            decoded,
+            expected_decision_id=decision_id,
+            # A9-02: verify the response signature WHEN PRESENT, against the
+            # decision key series and the bindings this adapter can vouch for —
+            # the SIGNED bundle's surface and the mapped action, never anything
+            # taken from the response being checked.
+            verification_keys=self._decision_verification_keys or None,
+            expected_bindings=DecisionBindings(
+                platform_id=surface.get("platform_id"),
+                environment=surface.get("environment"),
+                resource=surface.get("canonical_resource_uri"),
+                action_key=action,
+                bundle_version=bundle.bundle_version,
+            ),
+        )
 
     def _envelope(
         self,
@@ -618,6 +655,21 @@ class HttpDecideClient:
         }
 
 
+def _key_map(entries: Any) -> dict[str, str]:
+    """``key_id -> public_key_pem`` from one published key list."""
+    keys: dict[str, str] = {}
+    if not isinstance(entries, list):
+        return keys
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key_id = entry.get("key_id")
+        pem = entry.get("public_key_pem")
+        if isinstance(key_id, str) and key_id and isinstance(pem, str) and pem:
+            keys[key_id] = pem
+    return keys
+
+
 def _bounded_str(value: Any, limit: int) -> str | None:
     """A non-empty string within ``limit``, or ``None``."""
     if not isinstance(value, str):
@@ -632,6 +684,8 @@ def _read_decision(
     *,
     expected_decision_id: str,
     now: datetime | None = None,
+    verification_keys: dict[str, str] | None = None,
+    expected_bindings: DecisionBindings | None = None,
 ) -> DecideResult:
     """Turn an authority response into a result, or refuse to read it.
 
@@ -641,15 +695,24 @@ def _read_decision(
     that anything on the path could have produced — including a replay of a
     different request's genuine allow.
 
-    WHAT AUTHENTICATES THIS RESPONSE, STATED PLAINLY
-    ------------------------------------------------
-    ``/decide`` responses are NOT cryptographically signed in this release. The
-    controls are validated HTTPS to a verified destination, plus the strict
-    binding below. That is a real control and it is not a signature: it defends
-    against a confused or replaying authority and against cross-request mixups,
-    and it does NOT defend against a party who can terminate TLS. Signed
-    responses are a later protocol version. Nothing in this package, and nothing
-    in its documentation, may describe these responses as signed.
+    WHAT AUTHENTICATES THIS RESPONSE, STATED PLAINLY (A9-02)
+    --------------------------------------------------------
+    Two layers, and they are honestly different:
+
+    1. Validated HTTPS to a verified destination, plus the strict binding
+       below (contract, decision id, freshness). Real controls; they defend
+       against a confused or replaying authority and against cross-request
+       mixups, and they do NOT defend against a party who can terminate TLS.
+    2. The authority's RS256 response signature, verified WHEN PRESENT against
+       the published decision key series and this adapter's own surface/action
+       bindings (``_decision_signature``). A response carrying a signature that
+       does not verify completely — wrong key, wrong surface, mutated field,
+       expired window — is refused whole. A response carrying NO signature is
+       still read (the authority activates signing by rollout, and refusing
+       every unsigned response would make that activation a flag-day), which
+       means signature-stripping by a TLS-terminating party is not yet closed
+       until the authority's signing activation is universal. Nothing in this
+       package may overstate layer 2 beyond that.
 
     Every failure below returns a result the control loop deny-closes.
     """
@@ -700,6 +763,27 @@ def _read_decision(
     if deadline_at is not None and moment - _CLOCK_SKEW > deadline_at:
         _logger.warning("/decide response is past its deadline")
         return DecideResult("error")
+
+    # ── Signature (A9-02): verify when present, refuse when present-and-wrong ─
+    #
+    # Placed AFTER the envelope-level binding so the signature is checked on a
+    # response already known to answer THIS request, and BEFORE the outcome is
+    # read so no allow/deny is ever surfaced from a response whose signature
+    # failed. A present signature must verify completely — unknown key,
+    # mutated bound field, foreign surface/action, expired window all refuse
+    # the whole response. An absent signature is read as before: the authority
+    # rolls signing out by activation, and the rollout must not be a flag-day.
+    if decoded.get("signature") is not None:
+        try:
+            verify_decision_signature(
+                decoded,
+                verification_keys=verification_keys,
+                expected=expected_bindings,
+                now=moment,
+            )
+        except DecisionSignatureRefused as exc:
+            _logger.error("/decide response signature REFUSED (%s)", exc.code)
+            return DecideResult("error")
 
     # ── Outcome, and the governed reason code ────────────────────────────────
     decision = decoded.get("decision")

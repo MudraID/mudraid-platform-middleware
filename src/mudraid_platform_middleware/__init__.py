@@ -52,4 +52,4 @@ from importlib.metadata import version as _pkg_version
 try:
     __version__ = _pkg_version("mudraid-platform-middleware")
 except PackageNotFoundError:  # source checkout, not pip-installed
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"

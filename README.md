@@ -56,8 +56,13 @@ it](#4-verify-the-integration-before-trusting-it).
 ## Installation
 
 ```bash
-pip install mudraid-platform-middleware==1.1.0
+pip install mudraid-platform-middleware
 ```
+
+> **Which version this installs.** The latest on PyPI is **1.1.0**. This
+> source tree is **1.2.0**, which is not published yet — pinning `==1.2.0`
+> would fail to resolve. Install unpinned to get the current release, or pin
+> `==1.1.0` explicitly if you need a fixed version today.
 
 Requires Python 3.10+. Brings in `pyjwt[crypto]`, `cryptography`,
 `httpx`, `pyyaml`, and `starlette` as runtime deps.

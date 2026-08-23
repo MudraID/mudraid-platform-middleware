@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mudraid-platform-middleware"
-version = "1.1.0"
+version = "1.2.0"
 description = "FastAPI/Starlette middleware for MudraID — verifies MudraID-issued JWTs against per-platform scopes with zero changes to your route handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ keywords = [
 classifiers = [
     # "Development Status :: 5 - Production/Stable" is a claim rather than a
     # formality, so it is made deliberately and it is made about ONE thing: this
-    # middleware's own surface. 1.1.0 is the API MudraID intends to keep, which
+    # middleware's own surface. 1.2.0 is the API MudraID intends to keep, which
     # is what this classifier says and all it says.
     #
     # It does NOT say the package is on PyPI yet — that is a different fact,
