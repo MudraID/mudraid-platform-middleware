@@ -4,7 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mudraid-platform-middleware"
-version = "1.2.0"
+# 1.2.1 — KAN-163. 1.2.0 IS ALREADY ON PyPI (releases: 1.1.0, 1.2.0), and PyPI
+# refuses a duplicate version, so the scope fix could not have reached a single
+# customer while this line said 1.2.0: the publish would simply have been
+# rejected. PATCH rather than MINOR because the change restores intended
+# behaviour and takes nothing away — it admits OAuth tokens that were being
+# refused despite carrying the required scope, and the refusals that SHOULD
+# happen (absent claim, substring near-miss, malformed claim) are unchanged and
+# pinned by tests.
+version = "1.2.1"
 description = "FastAPI/Starlette middleware for MudraID — verifies MudraID-issued JWTs against per-platform scopes with zero changes to your route handlers."
 readme = "README.md"
 requires-python = ">=3.10"

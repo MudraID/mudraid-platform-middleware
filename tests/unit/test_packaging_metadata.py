@@ -76,7 +76,7 @@ def test_the_declared_version_is_the_one_the_support_matrix_publishes() -> None:
 
     manifest = tomllib.loads((_PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     entry = next(p for p in matrix["packages"] if p["name"] == "mudraid-platform-middleware")
-    assert manifest["project"]["version"] == entry["version"] == "1.2.0"
+    assert manifest["project"]["version"] == entry["version"] == "1.2.1"
 
 
 def test_this_sdk_does_not_collide_with_the_internal_shared_library() -> None:

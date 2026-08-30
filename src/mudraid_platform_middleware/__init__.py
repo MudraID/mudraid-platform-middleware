@@ -52,4 +52,8 @@ from importlib.metadata import version as _pkg_version
 try:
     __version__ = _pkg_version("mudraid-platform-middleware")
 except PackageNotFoundError:  # source checkout, not pip-installed
-    __version__ = "1.2.0"
+    # MUST match pyproject's `version`. `test_version_single_source` pins the
+    # two together, and it caught this line being left behind when 1.2.0 was
+    # bumped to 1.2.1 for KAN-163 — which is precisely the drift issue #116
+    # created the guard for.
+    __version__ = "1.2.1"
