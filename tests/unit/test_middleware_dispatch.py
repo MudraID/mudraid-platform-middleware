@@ -340,6 +340,124 @@ async def test_token_with_no_scopes_claim_at_all_is_rejected(
     assert resp.json()["error_code"] == "MISSING_SCOPE"
 
 
+# ---- KAN-163: the claim shape real OAuth tokens actually carry ------------
+#
+# This package enforced scopes against `scopes` (a list) and nothing else. That
+# is the shape `JwtIssuer` mints and the shape `baseline_claims` hand-builds —
+# so the whole suite passed while the feature could not work against a single
+# genuinely-issued OAuth access token, which carries the RFC 6749 `scope` claim
+# as one space-delimited string. Every route on every platform using this
+# middleware was unreachable by every legitimately-scoped OAuth client.
+#
+# These tests mint the REAL shape. Without the fix the first two fail.
+
+
+def _oauth_claims(scope: str | None, **kw) -> dict[str, Any]:
+    """A claim set shaped like a real MudraID OAuth 2.0 access token.
+
+    `M2MAccessTokenIssuer` and `HumanDelegationAccessTokenIssuer` both write
+    `scope` as a space-delimited string, and OMIT it entirely when the client is
+    entitled to nothing — which is why `scope=None` here drops the key rather
+    than setting it empty.
+    """
+    claims = baseline_claims(**kw)
+    del claims["scopes"]
+    if scope is not None:
+        claims["scope"] = scope
+    return claims
+
+
+@pytest.mark.anyio
+async def test_real_oauth_token_with_space_delimited_scope_is_admitted(
+    tmp_path: Path,
+    rsa_private_key: str,
+    rsa_public_jwk: dict[str, Any],
+) -> None:
+    yaml_path = _write_yaml(
+        tmp_path,
+        _yaml(routes_yaml="  - method: GET\n    path: /items\n    scope: items:read\n"),
+    )
+    app = _make_app(yaml_path)
+    claims = _oauth_claims("items:read items:write", audience=PLATFORM_ID)
+    token = sign_jwt(rsa_private_key, claims)
+
+    with _mock_jwks(rsa_public_jwk):
+        async with _client(app) as c:
+            resp = await c.get("/items", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.anyio
+async def test_the_required_scope_must_be_one_of_the_delimited_values(
+    tmp_path: Path,
+    rsa_private_key: str,
+    rsa_public_jwk: dict[str, Any],
+) -> None:
+    """A substring is not a scope. "items:readonly" must not satisfy
+    "items:read" — which a naive `in` against the raw string would allow."""
+    yaml_path = _write_yaml(
+        tmp_path,
+        _yaml(routes_yaml="  - method: GET\n    path: /items\n    scope: items:read\n"),
+    )
+    app = _make_app(yaml_path)
+    claims = _oauth_claims("items:readonly", audience=PLATFORM_ID)
+    token = sign_jwt(rsa_private_key, claims)
+
+    with _mock_jwks(rsa_public_jwk):
+        async with _client(app) as c:
+            resp = await c.get("/items", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 403
+    assert resp.json()["error_code"] == "MISSING_SCOPE"
+
+
+@pytest.mark.anyio
+async def test_an_omitted_scope_claim_refuses(
+    tmp_path: Path,
+    rsa_private_key: str,
+    rsa_public_jwk: dict[str, Any],
+) -> None:
+    """The M2M issuer omits `scope` when the client is entitled to nothing.
+    Absence is an EMPTY grant, never a skipped check."""
+    yaml_path = _write_yaml(
+        tmp_path,
+        _yaml(routes_yaml="  - method: GET\n    path: /items\n    scope: items:read\n"),
+    )
+    app = _make_app(yaml_path)
+    token = sign_jwt(rsa_private_key, _oauth_claims(None, audience=PLATFORM_ID))
+
+    with _mock_jwks(rsa_public_jwk):
+        async with _client(app) as c:
+            resp = await c.get("/items", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 403
+    assert resp.json()["error_code"] == "MISSING_SCOPE"
+
+
+@pytest.mark.anyio
+async def test_the_agent_token_list_shape_still_works(
+    tmp_path: Path,
+    rsa_private_key: str,
+    rsa_public_jwk: dict[str, Any],
+) -> None:
+    """Reading `scope` INSTEAD of `scopes` would have swapped one broken half
+    for the other. `JwtIssuer` agent tokens carry the list, and they must keep
+    passing — this is the regression the obvious one-line fix would have caused."""
+    yaml_path = _write_yaml(
+        tmp_path,
+        _yaml(routes_yaml="  - method: GET\n    path: /items\n    scope: items:read\n"),
+    )
+    app = _make_app(yaml_path)
+    token = sign_jwt(rsa_private_key, baseline_claims(audience=PLATFORM_ID))
+
+    with _mock_jwks(rsa_public_jwk):
+        async with _client(app) as c:
+            resp = await c.get("/items", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200, resp.text
+
+
 # ---- token-shape failures (M5.9) -----------------------------------------
 
 

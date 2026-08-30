@@ -280,10 +280,31 @@ class MudraIDMiddleware(BaseHTTPMiddleware):
             _logger.warning("JWKS unavailable while verifying request: %s", exc)
             return _error(500, "JWKS_UNAVAILABLE", "could not verify token signature")
 
-        # 6b. Scope membership. The required scope MUST be present in
-        # the token's `scopes` claim.
-        token_scopes = claims.get("scopes")
-        if not isinstance(token_scopes, list) or rule.scope not in token_scopes:
+        # 6b. Scope membership. The required scope MUST be present in the
+        # token's granted set.
+        #
+        # TWO CLAIM SHAPES EXIST IN THIS ESTATE, AND THIS READS BOTH.
+        #
+        # This check used to read `scopes` only, and require a list. That is the
+        # shape `JwtIssuer` mints (agent tokens, iss "mudraid-identity"), and it
+        # is the shape this package's own test conftest hand-built — so every
+        # test passed while the feature could not work against a real token.
+        #
+        # It is NOT the shape of an OAuth 2.0 access token. Both
+        # `M2MAccessTokenIssuer` and `HumanDelegationAccessTokenIssuer` emit the
+        # RFC 6749 claim — "scope": "bookings:read bookings:create", a single
+        # space-delimited STRING. `claims.get("scopes")` on one of those returns
+        # None, `isinstance(None, list)` is False, and the route refused
+        # unconditionally, before ever looking at which scope was required. Every
+        # platform protecting routes with this middleware was unreachable by
+        # every legitimately-scoped OAuth client.
+        #
+        # Reading `scope` INSTEAD of `scopes` would have swapped one broken half
+        # for the other and taken the agent-token path down with it. Both are
+        # accepted; `scope` wins because it is the standard and the one real
+        # OAuth clients present.
+        token_scopes = _granted_scopes(claims)
+        if rule.scope not in token_scopes:
             return _error(
                 403,
                 "MISSING_SCOPE",
@@ -522,6 +543,33 @@ def _error(status_code: int, error_code: str, message: str) -> Response:
 
 
 # ---- V2-mode helpers -----------------------------------------------------
+
+
+def _granted_scopes(claims: dict) -> frozenset[str]:
+    """The scopes a token grants, from either claim shape it may carry.
+
+    ``scope``  — RFC 6749: one space-delimited string. What every OAuth 2.0
+                 access token this estate issues actually carries.
+    ``scopes`` — a JSON list. What ``JwtIssuer`` mints for agent tokens.
+
+    An ABSENT claim is an empty grant, never a skipped check: the M2M issuer
+    omits ``scope`` entirely when the client is entitled to nothing, so absence
+    must refuse rather than pass.
+
+    Anything else under either name is ignored rather than coerced. A number or
+    an object under ``scope`` is a malformed token, and guessing at its meaning
+    would be inventing an authorization; the result is then empty, which
+    refuses — the safe direction.
+    """
+    raw = claims.get("scope")
+    if isinstance(raw, str):
+        # str.split() with no argument splits on ANY run of whitespace and drops
+        # empties, so a doubled space or a stray tab cannot mint a "" scope.
+        return frozenset(raw.split())
+    listed = claims.get("scopes")
+    if isinstance(listed, (list, tuple)):
+        return frozenset(s for s in listed if isinstance(s, str))
+    return frozenset()
 
 
 def _v2_error(decision: V2Decision) -> Response:
